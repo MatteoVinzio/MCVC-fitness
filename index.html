@@ -305,8 +305,9 @@ function cicli(){ return DB.meso.cicli; }
 function curCiclo(){ const a=cicli(); return a[a.length-1]; }
 
 let saveTimer=null;
-function scheduleSave(){ DB.updatedAt=new Date().toISOString(); clearTimeout(saveTimer); saveTimer=setTimeout(saveDB,250); }
-function saveDB(){ try{ localStorage.setItem(LS_KEY,JSON.stringify(DB)); flashSaved(); }catch(e){ toast("⚠️ Memoria piena: esporta un backup"); } if(loggedIn() && syncBooted) schedulePush(); }
+function scheduleSave(){ DB.updatedAt=new Date().toISOString(); markDirty(); clearTimeout(saveTimer); saveTimer=setTimeout(saveDB,250); }
+function saveLocal(){ try{ localStorage.setItem(LS_KEY,JSON.stringify(DB)); flashSaved(); }catch(e){ toast("⚠️ Memoria piena: esporta un backup"); } }
+function saveDB(){ saveLocal(); maybeSchedulePush(); }
 function flashSaved(){ if(loggedIn()) return; const d=document.getElementById("savedDot"); d.classList.add("show"); clearTimeout(flashSaved._t); flashSaved._t=setTimeout(()=>d.classList.remove("show"),1100); }
 
 /* ============================================================
@@ -315,8 +316,15 @@ function flashSaved(){ if(loggedIn()) return; const d=document.getElementById("s
    - Authorization: Bearer <token di sessione utente> (MAI la publishable)
    - localStorage resta il salvataggio locale/backup
    ============================================================ */
-let pushTimer=null; let syncBooted=false;
+let pushTimer=null; let syncBooted=false; let lastRefreshAt=0;
 function syncConfigured(){ return !!(SUPABASE_URL && SUPABASE_KEY); }
+/* stato sync persistito: dirty = modifiche reali dell'utente non ancora sul cloud;
+   lastSrv = updated_at del SERVER all'ultimo allineamento (mai l'orologio del telefono) */
+const META_LS="mcvc_sync_meta_v1";
+let META=(function(){ try{ const m=JSON.parse(localStorage.getItem(META_LS)||"null"); if(m&&typeof m==="object") return {lastSrv:m.lastSrv||"",dirty:!!m.dirty}; }catch(e){} return {lastSrv:"",dirty:false}; })();
+function saveMeta(){ try{ localStorage.setItem(META_LS,JSON.stringify(META)); }catch(e){} }
+function markDirty(){ if(!META.dirty){ META.dirty=true; saveMeta(); } }
+function clearDirty(srvTime){ META.dirty=false; if(srvTime) META.lastSrv=srvTime; saveMeta(); }
 function getSession(){ try{ const s=JSON.parse(localStorage.getItem(AUTH_LS)||"null"); return (s&&s.access_token&&s.refresh_token)?s:null; }catch(e){ return null; } }
 function setSession(s){ try{ localStorage.setItem(AUTH_LS,JSON.stringify(s)); }catch(e){} }
 function clearSession(){ try{ localStorage.removeItem(AUTH_LS); }catch(e){} }
@@ -338,12 +346,15 @@ async function authLogin(email,pass){
 async function ensureFreshToken(){
   const s=getSession(); if(!s) throw new Error("Accesso non effettuato");
   const now=Math.floor(Date.now()/1000);
-  if(s.expires_at && (s.expires_at-now)>60) return s.access_token;
+  if(s.expires_at && (s.expires_at-now)>120) return s.access_token;
   console.log("[SYNC] Token in scadenza → rinnovo sessione…");
-  const r=await fetch(SUPABASE_URL+"/auth/v1/token?grant_type=refresh_token",{method:"POST",
-    headers:{apikey:SUPABASE_KEY,"Content-Type":"application/json"},
-    body:JSON.stringify({refresh_token:s.refresh_token})});
-  if(!r.ok){ const m=await parseErr(r); console.error("[SYNC] Rinnovo sessione fallito:",m); clearSession(); throw new Error("Sessione scaduta: accedi di nuovo"); }
+  let r;
+  try{
+    r=await fetch(SUPABASE_URL+"/auth/v1/token?grant_type=refresh_token",{method:"POST",
+      headers:{apikey:SUPABASE_KEY,"Content-Type":"application/json"},
+      body:JSON.stringify({refresh_token:s.refresh_token})});
+  }catch(netErr){ console.warn("[SYNC] Rinnovo sessione: errore di rete, sessione mantenuta, riproverò:",netErr.message); throw new Error("Offline: impossibile rinnovare la sessione"); }
+  if(!r.ok){ const m=await parseErr(r); console.error("[SYNC] Rinnovo sessione rifiutato dal server:",m); clearSession(); throw new Error("Sessione scaduta: accedi di nuovo"); }
   const j=await r.json();
   setSession({access_token:j.access_token,refresh_token:j.refresh_token||s.refresh_token,expires_at:j.expires_at,email:s.email});
   console.log("[SYNC] Sessione rinnovata fino a",new Date((j.expires_at||0)*1000).toLocaleTimeString("it-IT"));
@@ -379,8 +390,14 @@ async function syncPull(){
   console.log("[SYNC] Nessun record remoto con id="+SYNC_ID);
   return null;
 }
-async function syncPush(){
-  const payload=[{id:SYNC_ID, data:DB, updated_at:DB.updatedAt||new Date().toISOString()}];
+async function syncPush(force){
+  /* PROTEZIONE FONDAMENTALE: un database vuoto/appena inizializzato non
+     sovrascrive MAI dati già presenti sul cloud (a meno di forzatura esplicita) */
+  if(!force && isEmptyDB(DB) && META.lastSrv){
+    console.warn("[SYNC] BLOCCATO: locale vuoto e sul cloud esistono dati → non invio nulla (protezione anti-cancellazione)");
+    throw new Error("Protezione: dati locali vuoti, invio annullato");
+  }
+  const payload=[{id:SYNC_ID, data:DB}]; /* updated_at NON viene inviato: lo mette il SERVER */
   const r=await restFetch("/rest/v1/mcvc_state?on_conflict=id",{method:"POST",
     headers:{"Content-Type":"application/json",Prefer:"resolution=merge-duplicates,return=representation"},
     body:JSON.stringify(payload)});
@@ -388,24 +405,27 @@ async function syncPush(){
   const j=await r.json();
   const rec=(Array.isArray(j)&&j[0]&&j[0].id===SYNC_ID)?j[0]:null;
   if(!rec){ console.error("[SYNC] Risposta inattesa al salvataggio:",j); throw new Error("Supabase non ha restituito il record salvato"); }
-  console.log("[SYNC] Salvataggio confermato da Supabase:",{id:rec.id, updated_at:rec.updated_at});
+  console.log("[SYNC] Salvataggio confermato da Supabase (ora del server):",{id:rec.id, updated_at:rec.updated_at});
+  clearDirty(rec.updated_at);
   return rec;
 }
 
-/* ---- decisione locale vs remoto (pura, testabile) ---- */
-function decideSync(localDb,cloud){
-  if(!cloud || !cloud.data) return {act:"push", why:"nessun record remoto → creo il record con i dati locali"};
-  const ct=Date.parse(cloud.updated_at||(cloud.data&&cloud.data.updatedAt)||0)||0;
-  const lt=Date.parse(localDb.updatedAt||0)||0;
+/* ---- decisione locale vs remoto: SOLO tempi del server + modifiche reali ----
+   cloudChanged = il cloud è cambiato rispetto all'ultimo allineamento visto da QUESTO dispositivo
+   dirty        = l'utente ha modificato qualcosa QUI e non è ancora sul cloud            */
+function decideSync(localDb,cloud,meta){
+  if(!cloud || !cloud.data) return {act:"push", why:"nessun record remoto → creo il record con i dati locali", force:true};
   const lv=isEmptyDB(localDb), rv=isEmptyDB(cloud.data);
-  if(lv&&!rv) return {act:"pull", why:"locale vuoto/appena inizializzato, remoto con dati → carico il remoto (protezione sovrascrittura)"};
-  if(!lv&&rv) return {act:"push", why:"remoto vuoto, locale con dati → invio il locale"};
-  if(ct>lt+1500) return {act:"pull", why:"remoto più recente → carico il remoto"};
-  if(lt>ct+1500) return {act:"push", why:"locale più recente → invio il locale"};
+  if(lv&&!rv) return {act:"pull", why:"locale vuoto/appena inizializzato, remoto con dati → carico il remoto (protezione anti-cancellazione)"};
+  const cloudChanged = (cloud.updated_at||"") !== (meta.lastSrv||"");
+  if(!lv&&rv) return {act:"push", why:"remoto vuoto, locale con dati → invio il locale", force:true};
+  if(cloudChanged && !meta.dirty) return {act:"pull", why:"il cloud ha novità e qui non ho modifiche → carico il remoto"};
+  if(!cloudChanged && meta.dirty) return {act:"push", why:"modifiche fatte qui non ancora inviate → invio il locale"};
+  if(cloudChanged && meta.dirty) return {act:"push", why:"conflitto (novità sia qui che sul cloud) → tengo il dispositivo in uso; nota: eventuali modifiche fatte altrove nello stesso intervallo vengono sostituite"};
   return {act:"none", why:"già allineati"};
 }
-function adottaRemoto(cloud){ DB=migrate(cloud.data); DB.updatedAt=(cloud.data&&cloud.data.updatedAt)||cloud.updated_at||DB.updatedAt;
-  try{ localStorage.setItem(LS_KEY,JSON.stringify(DB)); }catch(e){}
+function adottaRemoto(cloud){ DB=migrate(cloud.data); DB.updatedAt=(cloud.data&&cloud.data.updatedAt)||DB.updatedAt;
+  saveLocal(); clearDirty(cloud.updated_at);
   resetNav(); render(); }
 
 /* ---- badge di stato (onesto: "Sincronizzato" solo a salvataggio verificato) ---- */
@@ -418,31 +438,45 @@ function setSyncBadge(st,msg){ const b=document.getElementById("syncBadge");
   b.onclick=()=>toast("Errore sincronizzazione: "+(msg||"sconosciuto"));
 }
 
-function schedulePush(){ if(!loggedIn()) return; setSyncBadge("busy"); clearTimeout(pushTimer);
-  pushTimer=setTimeout(async()=>{ try{ await syncPush(); setSyncBadge("ok"); }catch(e){ setSyncBadge("err",e.message); } },900); }
+/* push automatico: SOLO dopo modifiche reali, SOLO a pagina visibile, mai dal background */
+function maybeSchedulePush(){
+  if(!loggedIn()||!syncBooted||!META.dirty) return;
+  if(typeof document!=="undefined" && document.visibilityState!=="visible"){ console.log("[SYNC] Pagina in background: invio rimandato al prossimo ritorno in primo piano"); return; }
+  if(isEmptyDB(DB) && META.lastSrv){ console.warn("[SYNC] Invio automatico sospeso: locale vuoto con dati sul cloud (protezione)"); return; }
+  setSyncBadge("busy"); clearTimeout(pushTimer);
+  pushTimer=setTimeout(async()=>{
+    if(!META.dirty) { setSyncBadge("ok"); return; }
+    if(typeof document!=="undefined" && document.visibilityState!=="visible"){ console.log("[SYNC] Timer risvegliato in background: invio annullato (verrà rifatto dopo il controllo del cloud)"); return; }
+    try{ await syncPush(); setSyncBadge("ok"); }catch(e){ setSyncBadge("err",e.message); }
+  },900);
+}
+function schedulePush(){ maybeSchedulePush(); }
 
 async function syncInit(){
   if(!loggedIn()){ setSyncBadge("off"); syncBooted=true; return; }
   setSyncBadge("busy");
-  console.log("[SYNC] Avvio. Dati locali:",sintesiDB(DB));
+  console.log("[SYNC] Avvio. Dati locali:",sintesiDB(DB),"· modifiche in sospeso:",META.dirty,"· ultimo allineamento server:",META.lastSrv||"mai");
   try{
     const cloud=await syncPull();
-    const d=decideSync(DB,cloud);
+    const d=decideSync(DB,cloud,META);
     console.log("[SYNC] Scelta:",d.why);
     if(d.act==="pull") adottaRemoto(cloud);
-    else if(d.act==="push") await syncPush();
+    else if(d.act==="push") await syncPush(d.force===true);
+    else if(cloud) clearDirty(cloud.updated_at);
     setSyncBadge("ok");
   }catch(e){ console.error("[SYNC] ERRORE in avvio:",e.message); setSyncBadge("err",e.message); }
   syncBooted=true;
 }
 async function syncRefresh(){
   if(!loggedIn()||!syncBooted) return;
+  const now=Date.now(); if(now-lastRefreshAt<4000) return; lastRefreshAt=now;
   try{
     const cloud=await syncPull();
-    const d=decideSync(DB,cloud);
-    if(d.act!=="none") console.log("[SYNC] Aggiornamento in primo piano:",d.why);
+    const d=decideSync(DB,cloud,META);
+    if(d.act!=="none") console.log("[SYNC] Ritorno in primo piano:",d.why);
     if(d.act==="pull") adottaRemoto(cloud);
-    else if(d.act==="push") await syncPush();
+    else if(d.act==="push") await syncPush(d.force===true);
+    else if(cloud) clearDirty(cloud.updated_at);
     setSyncBadge("ok");
   }catch(e){ console.error("[SYNC] ERRORE aggiornamento:",e.message); setSyncBadge("err",e.message); }
 }
@@ -450,13 +484,15 @@ async function syncRefresh(){
 async function syncNow(silenzioso){
   if(!loggedIn()){ openLogin(); return; }
   setSyncBadge("busy"); if(!silenzioso) toast("Sincronizzo…");
-  console.log("[SYNC] Sincronizzazione manuale. Dati locali:",sintesiDB(DB));
+  console.log("[SYNC] Sincronizzazione manuale. Dati locali:",sintesiDB(DB),"· modifiche in sospeso:",META.dirty);
   try{
     const cloud=await syncPull();
-    const d=decideSync(DB,cloud);
+    const d=decideSync(DB,cloud,META);
     console.log("[SYNC] Scelta:",d.why);
-    if(d.act==="pull") adottaRemoto(cloud);
-    else await syncPush(); /* anche se "allineati": push di conferma, verificato */
+    if(d.act==="pull"){ adottaRemoto(cloud); }
+    else if(d.act==="push"||META.dirty){ await syncPush(d.force===true); }
+    else { /* allineati: push di conferma solo se il locale ha dati */
+      if(!isEmptyDB(DB)) await syncPush(); else if(cloud) clearDirty(cloud.updated_at); }
     setSyncBadge("ok"); toast("Sincronizzato ✓ "+new Date().toLocaleTimeString("it-IT",{hour:"2-digit",minute:"2-digit"}));
   }catch(e){ console.error("[SYNC] ERRORE sync manuale:",e.message); setSyncBadge("err",e.message); toast("Errore sincronizzazione: "+e.message); }
 }
@@ -1034,7 +1070,7 @@ function renderPannello(root){
       box.appendChild(el("div",{class:"aa"},[
         el("button",{class:"btn soft sm",html:'⬇︎ Excel',onclick:()=>exportExcel(item,item.schede,item.nome)}),
         el("button",{class:"btn danger sm",html:'🗑 Elimina',onclick:()=>{ if(confirm("Eliminare definitivamente «"+item.nome+"»?")){ DB.archivio=DB.archivio.filter(x=>x.id!==item.id); scheduleSave(); render(); } }}) ])); root.appendChild(box); }); }
-  root.appendChild(el("div",{class:"hint",style:"text-align:center;margin-top:16px",text:"MCVC Fitness tracker · v5"}));
+  root.appendChild(el("div",{class:"hint",style:"text-align:center;margin-top:16px",text:"MCVC Fitness tracker · v6"}));
 }
 function continuaMesociclo(){
   const cur=curCiclo(); const prevEnd=dayDate(cur.weeks.length-1,6,cur.startDate);
@@ -1086,7 +1122,7 @@ function exportBackup(){ const blob=new Blob([JSON.stringify(DB,null,2)],{type:"
 function importBackup(ev){ const f=ev.target.files&&ev.target.files[0]; if(!f) return; const rd=new FileReader();
   rd.onload=()=>{ try{ const obj=JSON.parse(rd.result); if(!obj||(typeof obj!=="object")) throw new Error("File non valido");
     if(!confirm("Ripristinare questo backup? I dati attuali verranno sostituiti.")){ ev.target.value=""; return; }
-    DB=migrate(obj); resetNav(); saveDB(); render(); toast("Backup ripristinato");
+    DB=migrate(obj); markDirty(); resetNav(); saveDB(); render(); toast("Backup ripristinato");
   }catch(e){ toast("File non valido: "+e.message); } ev.target.value=""; }; rd.readAsText(f); }
 
 /* ========================= AVVIO ========================= */
@@ -1095,9 +1131,10 @@ function importBackup(ev){ const f=ev.target.files&&ev.target.files[0]; if(!f) r
 render();
 if(loggedIn()){ syncInit(); }
 else { syncBooted=true; setSyncBadge("off"); if(syncConfigured() && !localStorage.getItem(SKIP_LS)) openLogin(); }
-window.addEventListener("pagehide",saveDB);
-window.addEventListener("beforeunload",saveDB);
-document.addEventListener("visibilitychange",()=>{ if(document.visibilityState==="hidden") saveDB(); else syncRefresh(); });
+window.addEventListener("pagehide",saveLocal);
+window.addEventListener("beforeunload",saveLocal);
+document.addEventListener("visibilitychange",()=>{ if(document.visibilityState==="hidden") saveLocal(); else syncRefresh(); });
+window.addEventListener("focus",()=>syncRefresh());
 </script>
 </body>
 </html>
