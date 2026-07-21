@@ -31,10 +31,14 @@
   header.top .htxt{flex:1;min-width:0;}
   header.top .htitle{font-weight:800;font-size:16px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;letter-spacing:-.2px;}
   header.top .hsub{font-size:12px;color:var(--ink-soft);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-  .badge{font-size:11px;font-weight:700;padding:3px 8px;border-radius:20px;white-space:nowrap;display:none;}
+  .badge{font-size:11px;font-weight:700;padding:3px 8px;border-radius:20px;white-space:nowrap;display:none;max-width:150px;overflow:hidden;text-overflow:ellipsis;cursor:pointer;}
   .badge.show{display:inline-block;}
   .badge.ok{background:#e4f5e7;color:#2e9e4f;} .badge.busy{background:var(--orange-soft);color:var(--orange-dark);}
   .badge.err{background:#fdeceb;color:#c0392b;}
+  .badge.off{background:#eceef1;color:#6b7280;}
+  .login-err{color:#c0392b;font-size:13px;font-weight:600;margin:0 0 10px;min-height:17px;}
+  .mdelta{font-size:11px;color:var(--ink-soft);font-weight:600;}
+  .mis-del{border:none;background:none;font-size:14px;cursor:pointer;padding:2px 4px;}
   .saved-dot{font-size:11px;color:#2e9e4f;font-weight:700;opacity:0;transition:opacity .25s;}
   .saved-dot.show{opacity:1;}
 
@@ -197,13 +201,19 @@
 (function(){ const L=document.getElementById("logo"); const f=document.getElementById("fav"); if(f) f.href=L.src; })();
 
 /* ============================================================
-   CONFIGURAZIONE SINCRONIZZAZIONE  (incolla qui e basta)
-   Lascia vuoto per usare solo il dispositivo. Con i valori
-   inseriti, la sync tra PC e iPhone è automatica.
+   SINCRONIZZAZIONE — configurazione (GIÀ COMPILATA, non toccare)
+   La publishable key è fatta per stare nel client: va SOLO
+   nell'header "apikey", MAI come "Authorization: Bearer".
+   Come Bearer viaggia solo il token utente dopo il login.
+   La protezione vera: login email+password + policy RLS
+   riservate agli utenti autenticati.
    ============================================================ */
 const SUPABASE_URL = "https://ipuulwuwmezbwnwgdfio.supabase.co";
-const SUPABASE_ANON_KEY = "sb_publishable_SSBls2UjbY9YNz_GdtymuA_0m1VTYJt";
-const SYNC_ID = "mcvc-main";
+const SUPABASE_KEY = "sb_publishable_SSBls2UjbY9YNz_GdtymuA_0m1VTYJt";
+const SYNC_ID = "mcvc-main";    // identificativo fisso del record
+const AUTH_LS = "mcvc_auth_v1"; // dove vive la sessione (access/refresh token)
+const SKIP_LS = "mcvc_sync_skip"; // "1" = ha scelto di usare solo questo dispositivo
+
 /* ============================================================ */
 const LS_KEY="mcvc_training_v1";
 
@@ -257,10 +267,10 @@ function defaultDB(){
     ex("T-bar (buco 3)","1x8-10","/"),ex("Lat unilaterale","1x7-9","2'"),ex("Lat unilaterale","1x9-12","/"),
     ex("Peck back","3x12-20","1'30\""),ex("Curl barra Z al cavo basso","1x6-8","1'30\""),
     ex("Curl barra Z al cavo basso","1x9-11","1'30\""),ex("Bayesian curl buco 30","2x10-15","1'30\"")];
-  return { v:4, updatedAt:new Date().toISOString(),
+  return { v:5, updatedAt:new Date().toISOString(),
     meso:{ nome:"Mesociclo 1", cicli:[ newCiclo("Ciclo 1", toISO(lastMonday())) ] },
     schede:{ days:[ {nome:"Giorno 1",weeks:[{exercises:g1}]},{nome:"Giorno 2",weeks:[{exercises:[]}]},
-                    {nome:"Giorno 3",weeks:[{exercises:[]}]},{nome:"Giorno 4",weeks:[{exercises:[]}]} ] }, archivio:[] };
+                    {nome:"Giorno 3",weeks:[{exercises:[]}]},{nome:"Giorno 4",weeks:[{exercises:[]}]} ] }, archivio:[], misure:[] };
 }
 const DKEYS=["allen","carbo","prot","grassi","kcal","peso","sens","vis","sonnoH","sonnoM","qual","passi","app","stress"];
 function fixWeeks(weeks){ if(Array.isArray(weeks)) weeks.forEach(w=>{ if(!Array.isArray(w.days)) w.days=Array.from({length:7},emptyDiaDay);
@@ -283,7 +293,8 @@ function migrate(db){
   if(!db.schede) db.schede={days:[]}; if(!Array.isArray(db.schede.days)) db.schede.days=[];
   if(!Array.isArray(db.archivio)) db.archivio=[];
   db.archivio.forEach(m=>{ if(Array.isArray(m.cicli)) m.cicli.forEach(fixCiclo); });
-  if(!db.updatedAt) db.updatedAt=new Date().toISOString(); db.v=4; return db;
+  if(!Array.isArray(db.misure)) db.misure=[];
+  if(!db.updatedAt) db.updatedAt=new Date().toISOString(); db.v=5; return db;
 }
 function loadDB(){ try{ const raw=localStorage.getItem(LS_KEY); if(!raw) return defaultDB(); return migrate(JSON.parse(raw)); }
   catch(e){ try{const b=localStorage.getItem(LS_KEY); if(b) localStorage.setItem(LS_KEY+"_corrotto_"+Date.now(),b);}catch(_){}; return defaultDB(); } }
@@ -295,37 +306,185 @@ function curCiclo(){ const a=cicli(); return a[a.length-1]; }
 
 let saveTimer=null;
 function scheduleSave(){ DB.updatedAt=new Date().toISOString(); clearTimeout(saveTimer); saveTimer=setTimeout(saveDB,250); }
-function saveDB(){ try{ localStorage.setItem(LS_KEY,JSON.stringify(DB)); flashSaved(); }catch(e){ toast("⚠️ Memoria piena: esporta un backup"); } if(syncReady()) schedulePush(); }
-function flashSaved(){ if(syncReady()) return; const d=document.getElementById("savedDot"); d.classList.add("show"); clearTimeout(flashSaved._t); flashSaved._t=setTimeout(()=>d.classList.remove("show"),1100); }
+function saveDB(){ try{ localStorage.setItem(LS_KEY,JSON.stringify(DB)); flashSaved(); }catch(e){ toast("⚠️ Memoria piena: esporta un backup"); } if(loggedIn() && syncBooted) schedulePush(); }
+function flashSaved(){ if(loggedIn()) return; const d=document.getElementById("savedDot"); d.classList.add("show"); clearTimeout(flashSaved._t); flashSaved._t=setTimeout(()=>d.classList.remove("show"),1100); }
 
-/* ========================= SYNC automatica (Supabase REST) ========================= */
-let pushTimer=null;
-function syncReady(){ return !!(SUPABASE_URL && SUPABASE_ANON_KEY); }
-function endpoint(){ return SUPABASE_URL.replace(/\/+$/,"")+"/rest/v1/mcvc_state"; }
-function syncHeaders(extra){
-  return Object.assign({
-    apikey: SUPABASE_ANON_KEY
-  }, extra || {});
-}function setSyncBadge(st){ const b=document.getElementById("syncBadge"); if(!syncReady()){ b.className="badge"; return; }
-  b.className="badge show "+(st==="ok"?"ok":st==="busy"?"busy":"err"); b.textContent = st==="ok"?"Sync ✓":st==="busy"?"Sync…":"Sync !"; }
-async function syncPull(){ if(!syncReady()) return null;
-  const r=await fetch(endpoint()+"?id=eq."+encodeURIComponent(SYNC_ID)+"&select=data,updated_at",{headers:syncHeaders()});
-  if(!r.ok) throw new Error("HTTP "+r.status); const j=await r.json(); return (j&&j[0])?j[0]:null; }
-async function syncPush(){ if(!syncReady()) return;
-  const r=await fetch(endpoint(),{method:"POST",headers:syncHeaders({"Content-Type":"application/json",Prefer:"resolution=merge-duplicates,return=minimal"}),
-    body:JSON.stringify([{id:SYNC_ID,data:DB,updated_at:new Date().toISOString()}])});
-  if(!r.ok) throw new Error("HTTP "+r.status); }
-function schedulePush(){ if(!syncReady()) return; setSyncBadge("busy"); clearTimeout(pushTimer);
-  pushTimer=setTimeout(async()=>{ try{ await syncPush(); setSyncBadge("ok"); }catch(e){ setSyncBadge("err"); } },900); }
-async function syncInit(){ if(!syncReady()){ setSyncBadge(); return; } setSyncBadge("busy");
-  try{ const cloud=await syncPull();
-    if(cloud){ const ct=Date.parse(cloud.updated_at||0), lt=Date.parse(DB.updatedAt||0);
-      if(ct>lt && cloud.data){ DB=migrate(cloud.data); localStorage.setItem(LS_KEY,JSON.stringify(DB)); resetNav(); render(); } else if(lt>ct){ await syncPush(); } }
-    else { await syncPush(); } setSyncBadge("ok"); }catch(e){ setSyncBadge("err"); } }
-async function syncRefresh(){ if(!syncReady()) return; try{ const cloud=await syncPull();
-  if(cloud){ const ct=Date.parse(cloud.updated_at||0), lt=Date.parse(DB.updatedAt||0);
-    if(ct>lt && cloud.data){ DB=migrate(cloud.data); localStorage.setItem(LS_KEY,JSON.stringify(DB)); resetNav(); render(); } else if(lt>ct){ await syncPush(); } }
-  setSyncBadge("ok"); }catch(e){ setSyncBadge("err"); } }
+/* ============================================================
+   SINCRONIZZAZIONE (Supabase REST + login email/password)
+   - apikey: SEMPRE la publishable key
+   - Authorization: Bearer <token di sessione utente> (MAI la publishable)
+   - localStorage resta il salvataggio locale/backup
+   ============================================================ */
+let pushTimer=null; let syncBooted=false;
+function syncConfigured(){ return !!(SUPABASE_URL && SUPABASE_KEY); }
+function getSession(){ try{ const s=JSON.parse(localStorage.getItem(AUTH_LS)||"null"); return (s&&s.access_token&&s.refresh_token)?s:null; }catch(e){ return null; } }
+function setSession(s){ try{ localStorage.setItem(AUTH_LS,JSON.stringify(s)); }catch(e){} }
+function clearSession(){ try{ localStorage.removeItem(AUTH_LS); }catch(e){} }
+function loggedIn(){ return syncConfigured() && !!getSession(); }
+
+async function parseErr(r){ let m="HTTP "+r.status; try{ const j=await r.json(); m=j.message||j.error_description||j.error||j.msg||m; if(j.code&&String(j.code)!==String(r.status)) m+=" ["+j.code+"]"; }catch(e){} return m; }
+function trErr(m){ const t={"Invalid login credentials":"Email o password errati","invalid_credentials":"Email o password errati","Email not confirmed":"Utente non confermato: nel pannello Supabase spunta Auto Confirm","email_not_confirmed":"Utente non confermato: nel pannello Supabase spunta Auto Confirm","missing email or phone":"Inserisci l'email"}; return t[m]||m; }
+
+async function authLogin(email,pass){
+  const r=await fetch(SUPABASE_URL+"/auth/v1/token?grant_type=password",{method:"POST",
+    headers:{apikey:SUPABASE_KEY,"Content-Type":"application/json"},
+    body:JSON.stringify({email:email,password:pass})});
+  if(!r.ok){ const m=await parseErr(r); console.error("[SYNC] Login fallito:",m); throw new Error(trErr(m)); }
+  const j=await r.json();
+  setSession({access_token:j.access_token,refresh_token:j.refresh_token,expires_at:j.expires_at,email:(j.user&&j.user.email)||email});
+  try{ localStorage.removeItem(SKIP_LS); }catch(e){}
+  console.log("[SYNC] Login riuscito:",(j.user&&j.user.email)||email);
+}
+async function ensureFreshToken(){
+  const s=getSession(); if(!s) throw new Error("Accesso non effettuato");
+  const now=Math.floor(Date.now()/1000);
+  if(s.expires_at && (s.expires_at-now)>60) return s.access_token;
+  console.log("[SYNC] Token in scadenza → rinnovo sessione…");
+  const r=await fetch(SUPABASE_URL+"/auth/v1/token?grant_type=refresh_token",{method:"POST",
+    headers:{apikey:SUPABASE_KEY,"Content-Type":"application/json"},
+    body:JSON.stringify({refresh_token:s.refresh_token})});
+  if(!r.ok){ const m=await parseErr(r); console.error("[SYNC] Rinnovo sessione fallito:",m); clearSession(); throw new Error("Sessione scaduta: accedi di nuovo"); }
+  const j=await r.json();
+  setSession({access_token:j.access_token,refresh_token:j.refresh_token||s.refresh_token,expires_at:j.expires_at,email:s.email});
+  console.log("[SYNC] Sessione rinnovata fino a",new Date((j.expires_at||0)*1000).toLocaleTimeString("it-IT"));
+  return j.access_token;
+}
+async function restFetch(path,opts){
+  opts=opts||{};
+  let tok=await ensureFreshToken();
+  const doCall=(t)=>fetch(SUPABASE_URL+path,{method:opts.method||"GET",
+    headers:Object.assign({apikey:SUPABASE_KEY,Authorization:"Bearer "+t},opts.headers||{}), body:opts.body});
+  let r=await doCall(tok);
+  if(r.status===401){ console.warn("[SYNC] 401 dal server → forzo rinnovo token e riprovo una volta");
+    const s=getSession(); if(s){ s.expires_at=0; setSession(s); } tok=await ensureFreshToken(); r=await doCall(tok); }
+  return r;
+}
+
+/* ---- lettura/scrittura del record ---- */
+function sintesiDB(db){ try{ if(!db) return "(vuoto)";
+  let ns=0,gc=0; if(db.meso&&Array.isArray(db.meso.cicli)) db.meso.cicli.forEach(c=>{ ns+=c.weeks.length; c.weeks.forEach(w=>w.days.forEach(d=>{ if(DKEYS.some(k=>String(d[k]||"").trim()!=="")) gc++; })); });
+  return {aggiornato:db.updatedAt||"?", cicli:(db.meso&&db.meso.cicli)?db.meso.cicli.length:0, settimane:ns, giorniCompilati:gc, archivi:(db.archivio||[]).length, misure:(db.misure||[]).length};
+}catch(e){ return "(illeggibile)"; } }
+function isEmptyDB(db){ try{
+  const hasDia = db.meso.cicli.some(c=>c.weeks.some(w=>w.days.some(d=>DKEYS.some(k=>String(d[k]||"").trim()!==""))));
+  const hasTrain = db.schede.days.some(day=>day.weeks.some(w=>w.exercises.some(e=>String(e.peso||"").trim()!==""||String(e.sens||"").trim()!=="")));
+  return !(hasDia||hasTrain||(db.archivio||[]).length>0||(db.misure||[]).length>0);
+}catch(e){ return false; } }
+
+async function syncPull(){
+  const r=await restFetch("/rest/v1/mcvc_state?id=eq."+encodeURIComponent(SYNC_ID)+"&select=id,data,updated_at");
+  if(!r.ok){ const m=await parseErr(r); console.error("[SYNC] Lettura remota fallita:",m); throw new Error(m); }
+  const j=await r.json();
+  if(j&&j[0]){ console.log("[SYNC] Dati remoti trovati:",{updated_at:j[0].updated_at, contenuto:sintesiDB(j[0].data)}); return j[0]; }
+  console.log("[SYNC] Nessun record remoto con id="+SYNC_ID);
+  return null;
+}
+async function syncPush(){
+  const payload=[{id:SYNC_ID, data:DB, updated_at:DB.updatedAt||new Date().toISOString()}];
+  const r=await restFetch("/rest/v1/mcvc_state?on_conflict=id",{method:"POST",
+    headers:{"Content-Type":"application/json",Prefer:"resolution=merge-duplicates,return=representation"},
+    body:JSON.stringify(payload)});
+  if(!r.ok){ const m=await parseErr(r); console.error("[SYNC] Salvataggio remoto fallito:",m); throw new Error(m); }
+  const j=await r.json();
+  const rec=(Array.isArray(j)&&j[0]&&j[0].id===SYNC_ID)?j[0]:null;
+  if(!rec){ console.error("[SYNC] Risposta inattesa al salvataggio:",j); throw new Error("Supabase non ha restituito il record salvato"); }
+  console.log("[SYNC] Salvataggio confermato da Supabase:",{id:rec.id, updated_at:rec.updated_at});
+  return rec;
+}
+
+/* ---- decisione locale vs remoto (pura, testabile) ---- */
+function decideSync(localDb,cloud){
+  if(!cloud || !cloud.data) return {act:"push", why:"nessun record remoto → creo il record con i dati locali"};
+  const ct=Date.parse(cloud.updated_at||(cloud.data&&cloud.data.updatedAt)||0)||0;
+  const lt=Date.parse(localDb.updatedAt||0)||0;
+  const lv=isEmptyDB(localDb), rv=isEmptyDB(cloud.data);
+  if(lv&&!rv) return {act:"pull", why:"locale vuoto/appena inizializzato, remoto con dati → carico il remoto (protezione sovrascrittura)"};
+  if(!lv&&rv) return {act:"push", why:"remoto vuoto, locale con dati → invio il locale"};
+  if(ct>lt+1500) return {act:"pull", why:"remoto più recente → carico il remoto"};
+  if(lt>ct+1500) return {act:"push", why:"locale più recente → invio il locale"};
+  return {act:"none", why:"già allineati"};
+}
+function adottaRemoto(cloud){ DB=migrate(cloud.data); DB.updatedAt=(cloud.data&&cloud.data.updatedAt)||cloud.updated_at||DB.updatedAt;
+  try{ localStorage.setItem(LS_KEY,JSON.stringify(DB)); }catch(e){}
+  resetNav(); render(); }
+
+/* ---- badge di stato (onesto: "Sincronizzato" solo a salvataggio verificato) ---- */
+function setSyncBadge(st,msg){ const b=document.getElementById("syncBadge");
+  if(!syncConfigured()){ b.className="badge"; b.onclick=null; return; }
+  if(st==="off"){ b.className="badge show off"; b.textContent="Solo locale"; b.title="Tocca per accedere"; b.onclick=()=>openLogin(); return; }
+  if(st==="busy"){ b.className="badge show busy"; b.textContent="Sincronizzo…"; b.title=""; b.onclick=null; return; }
+  if(st==="ok"){ b.className="badge show ok"; b.textContent="Sincronizzato"; b.title="Tocca per sincronizzare ora"; b.onclick=()=>syncNow(true); return; }
+  b.className="badge show err"; b.textContent="Errore: "+(msg||"sync"); b.title=msg||"";
+  b.onclick=()=>toast("Errore sincronizzazione: "+(msg||"sconosciuto"));
+}
+
+function schedulePush(){ if(!loggedIn()) return; setSyncBadge("busy"); clearTimeout(pushTimer);
+  pushTimer=setTimeout(async()=>{ try{ await syncPush(); setSyncBadge("ok"); }catch(e){ setSyncBadge("err",e.message); } },900); }
+
+async function syncInit(){
+  if(!loggedIn()){ setSyncBadge("off"); syncBooted=true; return; }
+  setSyncBadge("busy");
+  console.log("[SYNC] Avvio. Dati locali:",sintesiDB(DB));
+  try{
+    const cloud=await syncPull();
+    const d=decideSync(DB,cloud);
+    console.log("[SYNC] Scelta:",d.why);
+    if(d.act==="pull") adottaRemoto(cloud);
+    else if(d.act==="push") await syncPush();
+    setSyncBadge("ok");
+  }catch(e){ console.error("[SYNC] ERRORE in avvio:",e.message); setSyncBadge("err",e.message); }
+  syncBooted=true;
+}
+async function syncRefresh(){
+  if(!loggedIn()||!syncBooted) return;
+  try{
+    const cloud=await syncPull();
+    const d=decideSync(DB,cloud);
+    if(d.act!=="none") console.log("[SYNC] Aggiornamento in primo piano:",d.why);
+    if(d.act==="pull") adottaRemoto(cloud);
+    else if(d.act==="push") await syncPush();
+    setSyncBadge("ok");
+  }catch(e){ console.error("[SYNC] ERRORE aggiornamento:",e.message); setSyncBadge("err",e.message); }
+}
+/* ---- tasto manuale: "quando finisco, sincronizza tutto" ---- */
+async function syncNow(silenzioso){
+  if(!loggedIn()){ openLogin(); return; }
+  setSyncBadge("busy"); if(!silenzioso) toast("Sincronizzo…");
+  console.log("[SYNC] Sincronizzazione manuale. Dati locali:",sintesiDB(DB));
+  try{
+    const cloud=await syncPull();
+    const d=decideSync(DB,cloud);
+    console.log("[SYNC] Scelta:",d.why);
+    if(d.act==="pull") adottaRemoto(cloud);
+    else await syncPush(); /* anche se "allineati": push di conferma, verificato */
+    setSyncBadge("ok"); toast("Sincronizzato ✓ "+new Date().toLocaleTimeString("it-IT",{hour:"2-digit",minute:"2-digit"}));
+  }catch(e){ console.error("[SYNC] ERRORE sync manuale:",e.message); setSyncBadge("err",e.message); toast("Errore sincronizzazione: "+e.message); }
+}
+function doLogout(){ if(!confirm("Uscire dall'account? I dati restano salvati su questo dispositivo.")) return;
+  clearSession(); setSyncBadge("off"); render(); toast("Disconnesso"); }
+
+/* ---- schermata di accesso ---- */
+function openLogin(){
+  const err=el("div",{class:"login-err"});
+  const em=el("input",{type:"email",placeholder:"la tua email",autocomplete:"username",inputmode:"email",autocapitalize:"off"});
+  const pw=el("input",{type:"password",placeholder:"password",autocomplete:"current-password"});
+  const btn=el("button",{class:"btn primary full",text:"Accedi"});
+  async function doLogin(){ btn.disabled=true; btn.textContent="Accesso in corso…"; err.textContent="";
+    try{ await authLogin(em.value.trim(),pw.value); m.close(); render(); await syncInit(); toast("Connesso: "+((getSession()||{}).email||"")); }
+    catch(e){ err.textContent=e.message; btn.disabled=false; btn.textContent="Accedi"; } }
+  btn.addEventListener("click",doLogin);
+  pw.addEventListener("keydown",e=>{ if(e.key==="Enter") doLogin(); });
+  const node=el("div",{},[
+    el("div",{style:"text-align:center;margin-bottom:10px"},[el("img",{src:document.getElementById("logo").src,alt:"MCVC",style:"width:58px;height:58px;border-radius:13px"})]),
+    el("div",{class:"modal-t",style:"text-align:center",text:"Accedi per sincronizzare"}),
+    el("div",{class:"modal-note",style:"text-align:center",text:"Con l'accesso, iPhone e PC si allineano da soli. I dati restano comunque salvati anche su questo dispositivo."}),
+    el("div",{class:"field"},[el("label",{class:"fl",text:"Email"}),em]),
+    el("div",{class:"field"},[el("label",{class:"fl",text:"Password"}),pw]),
+    err, btn,
+    el("button",{class:"btn ghost full",style:"margin-top:8px",text:"Continua senza account (solo questo dispositivo)",onclick:()=>{ try{ localStorage.setItem(SKIP_LS,"1"); }catch(e){} m.close(); setSyncBadge("off"); }})
+  ]);
+  const m=modal(node);
+}
 
 /* ========================= STATO UI ========================= */
 const state={ tab:"diario", diaCiclo:0, diaMode:"giorno", diaFlat:0, diaWeek:0,
@@ -632,7 +791,7 @@ function renderRiepilogo(root){
   const from=parseISO(state.riep.from), to=parseISO(state.riep.to);
   const rows=allDays().filter(r=>r.date>=from && r.date<=to);
   if(!rows.length){ root.appendChild(el("div",{class:"card"},[el("div",{class:"empty"},[el("div",{class:"big",text:"📊"}),el("div",{text:"Nessun dato in questo intervallo. Compila il Diario o allarga il periodo (prova «Tutto»)."})])]));
-    root.appendChild(consultSection()); return; }
+    root.appendChild(misureSection()); root.appendChild(consultSection()); return; }
   const rangeDays=Math.round((to-from)/86400000)+1; const weekly=rangeDays>35;
   const bins=binData(rows,weekly,state.riep.from); const labels=bins.map(b=>b.label);
 
@@ -691,6 +850,7 @@ function renderRiepilogo(root){
   const corsa=rows.filter(r=>r.allen.indexOf("Corsa")===0).length, calc=rows.filter(r=>r.allen.indexOf("Calcetto")===0).length, off=rows.filter(r=>r.allen==="Off").length;
   root.appendChild(el("div",{class:"stat-grid"},[ statCard(String(sedute),"Sedute pesi","hl"), statCard(String(corsa),"Corse"), statCard(String(calc),"Calcetto"), statCard(String(off),"Giorni off") ]));
 
+  root.appendChild(misureSection());
   root.appendChild(consultSection());
 }
 function kc(n,l){ return el("div",{class:"kc"},[el("div",{class:"n",text:n}),el("div",{class:"l",text:l})]); }
@@ -698,6 +858,52 @@ function statCard(n,l,cls){ return el("div",{class:"stat"+(cls?" "+cls:"")},[el(
 function statMini(n,l){ return el("div",{style:"text-align:center;background:var(--orange-soft);border-radius:10px;padding:10px"},[
   el("div",{style:"font-size:17px;font-weight:800;color:var(--orange-dark)",text:n}), el("div",{style:"font-size:11px;color:var(--ink-soft);text-transform:uppercase;margin-top:2px",text:l})]); }
 function round1(n){ return Math.round(n*10)/10; }
+
+/* ---- circonferenze (facoltative) ---- */
+const MIS_FIELDS=[["girovita","Girovita"],["cosciaDx","Coscia dx"],["cosciaSx","Coscia sx"],["braccioDx","Braccio dx"],["braccioSx","Braccio sx"],["petto","Petto / spalla"]];
+function askMisura(){
+  const dateI=el("input",{type:"date",value:toISO(today0())});
+  const inputs={}; const grid=el("div",{class:"grid2"});
+  MIS_FIELDS.forEach(f=>{ const i=el("input",{type:"text",inputmode:"decimal",placeholder:"cm",autocomplete:"off"}); inputs[f[0]]=i;
+    grid.appendChild(el("div",{class:"field"},[el("label",{class:"fl",text:f[1]}),i])); });
+  const node=el("div",{},[ el("div",{class:"modal-t",text:"Nuova rilevazione"}),
+    el("div",{class:"modal-note",text:"Compila solo le misure che hai preso: il resto può restare vuoto."}),
+    el("div",{class:"field"},[el("label",{class:"fl",text:"Data"}),dateI]), grid,
+    el("div",{class:"row-btns",style:"margin-top:10px"},[
+      el("button",{class:"btn ghost sm",text:"Annulla",onclick:()=>m.close()}),
+      el("button",{class:"btn primary sm",text:"Salva",onclick:()=>{
+        const rec={id:"mis_"+Date.now(), dataISO:dateI.value||toISO(today0())};
+        let any=false; MIS_FIELDS.forEach(f=>{ rec[f[0]]=(inputs[f[0]].value||"").trim(); if(rec[f[0]]!=="") any=true; });
+        if(!any){ toast("Inserisci almeno una misura"); return; }
+        DB.misure.push(rec); DB.misure.sort((a,b)=>a.dataISO<b.dataISO?-1:(a.dataISO>b.dataISO?1:0));
+        m.close(); scheduleSave(); render(); toast("Rilevazione salvata"); }}) ]) ]);
+  const m=modal(node);
+}
+function misureSection(){
+  const wrap=el("div",{});
+  wrap.appendChild(el("h2",{class:"sect",text:"Circonferenze (cm)"}));
+  const c=el("div",{class:"card"});
+  c.appendChild(el("div",{class:"cardhd"},[el("div",{class:"t",text:"Rilevazioni"}),el("div",{class:"v",text:DB.misure.length?(DB.misure.length+" totali"):"facoltative"})]));
+  c.appendChild(el("button",{class:"btn soft full",style:"margin-bottom:10px",html:'＋ Nuova rilevazione',onclick:askMisura}));
+  if(!DB.misure.length) c.appendChild(el("div",{class:"muted",text:"Segna girovita, cosce, braccia e petto quando vuoi: qui resta lo storico, con la differenza rispetto alla rilevazione precedente."}));
+  else c.appendChild(misureTable());
+  wrap.appendChild(c); return wrap;
+}
+function misureTable(){
+  const box=el("div",{class:"xls"}); const t=el("table");
+  const tr0=el("tr"); tr0.appendChild(el("th",{text:"Data"})); MIS_FIELDS.forEach(f=>tr0.appendChild(el("th",{text:f[1]}))); tr0.appendChild(el("th",{text:""})); t.appendChild(tr0);
+  const asc=DB.misure.slice().sort((a,b)=>a.dataISO<b.dataISO?-1:(a.dataISO>b.dataISO?1:0));
+  for(let i=asc.length-1;i>=0;i--){ const mrec=asc[i], prev=asc[i-1]||null; const tr=el("tr");
+    tr.appendChild(el("td",{text:fmtDateShort(parseISO(mrec.dataISO)),style:"font-weight:600"}));
+    MIS_FIELDS.forEach(f=>{ const v=parseNum(mrec[f[0]]); let html="";
+      if(v!==null){ html="<b>"+fmtNum(v,1)+"</b>";
+        const pv=prev?parseNum(prev[f[0]]):null;
+        if(pv!==null){ const dd=v-pv; if(Math.abs(dd)>=0.05) html+=' <span class="mdelta">'+(dd>0?"+":"−")+fmtNum(Math.abs(dd),1)+"</span>"; } }
+      tr.appendChild(el("td",{html:html})); });
+    const del=el("td",{}); del.appendChild(el("button",{class:"mis-del",html:"🗑",onclick:()=>{ if(confirm("Eliminare la rilevazione del "+fmtDateShort(parseISO(mrec.dataISO))+"?")){ DB.misure=DB.misure.filter(x=>x.id!==mrec.id); scheduleSave(); render(); } }}));
+    tr.appendChild(del); t.appendChild(tr); }
+  box.appendChild(t); return box;
+}
 
 /* ---- consultazione mesociclo (numerazione continua S1…Sn) ---- */
 function mesocicliList(){ const arr=[{id:"cur",label:"Mesociclo corrente — "+DB.meso.nome,meso:DB.meso}];
@@ -802,12 +1008,22 @@ function renderPannello(root){
   cp.appendChild(el("button",{class:"btn dark full",html:'🗄 Archivia mesociclo e ricomincia',onclick:archiviaMesociclo}));
   root.appendChild(cp);
 
+  root.appendChild(el("h2",{class:"sect",text:"Account & sincronizzazione"}));
+  const cs=el("div",{class:"card"});
+  if(loggedIn()){
+    cs.appendChild(el("div",{class:"muted",style:"margin-bottom:10px",html:"Connesso come <b>"+((getSession()||{}).email||"")+"</b>. Salvataggio automatico e allineamento tra iPhone e PC. Quando finisci una sessione, tocca «Sincronizza ora» (o il badge in alto) per la conferma finale."}));
+    cs.appendChild(el("button",{class:"btn primary full",style:"margin-bottom:9px",html:'🔄 Sincronizza ora',onclick:()=>syncNow(false)}));
+    cs.appendChild(el("button",{class:"btn ghost full",html:"Esci dall'account",onclick:doLogout}));
+  } else {
+    cs.appendChild(el("div",{class:"muted",style:"margin-bottom:10px",text:"Non sei connesso: i dati restano solo su questo dispositivo. Accedi con email e password per sincronizzare iPhone e PC."}));
+    cs.appendChild(el("button",{class:"btn primary full",html:'🔐 Accedi',onclick:openLogin}));
+  }
+  root.appendChild(cs);
+
   root.appendChild(el("h2",{class:"sect",text:"Salvataggio & Export"}));
   const ce=el("div",{class:"card"});
-  ce.appendChild(el("div",{class:"muted",style:"margin-bottom:10px",text: syncReady()
-    ? "Sincronizzazione attiva: i dati si allineano da soli tra PC e iPhone. Esporta comunque un backup ogni tanto."
-    : "Salvataggio automatico su questo dispositivo. Esporta un backup ogni tanto: è la tua rete di sicurezza."}));
-  ce.appendChild(el("button",{class:"btn primary full",style:"margin-bottom:9px",html:'⬇︎ Esporta mesociclo corrente in Excel',onclick:()=>exportExcel(DB.meso,DB.schede,DB.meso.nome)}));
+  ce.appendChild(el("div",{class:"muted",style:"margin-bottom:10px",text:"Il salvataggio locale su questo dispositivo è sempre attivo. Esporta un backup ogni tanto: è la tua rete di sicurezza."}));
+  ce.appendChild(el("button",{class:"btn primary full",style:"margin-bottom:9px",html:'⬇︎ Esporta mesociclo corrente in Excel',onclick:()=>exportExcel(DB.meso,DB.schede,DB.meso.nome,DB.misure)}));
   ce.appendChild(el("button",{class:"btn ghost full",style:"margin-bottom:9px",html:'💾 Backup completo (.json)',onclick:exportBackup}));
   const fileIn=el("input",{type:"file",accept:".json,application/json",style:"display:none"}); fileIn.addEventListener("change",importBackup);
   ce.appendChild(fileIn); ce.appendChild(el("button",{class:"btn ghost full",html:'📂 Ripristina da backup (.json)',onclick:()=>fileIn.click()})); root.appendChild(ce);
@@ -818,7 +1034,7 @@ function renderPannello(root){
       box.appendChild(el("div",{class:"aa"},[
         el("button",{class:"btn soft sm",html:'⬇︎ Excel',onclick:()=>exportExcel(item,item.schede,item.nome)}),
         el("button",{class:"btn danger sm",html:'🗑 Elimina',onclick:()=>{ if(confirm("Eliminare definitivamente «"+item.nome+"»?")){ DB.archivio=DB.archivio.filter(x=>x.id!==item.id); scheduleSave(); render(); } }}) ])); root.appendChild(box); }); }
-  root.appendChild(el("div",{class:"hint",style:"text-align:center;margin-top:16px",text:"MCVC Fitness tracker · v4"}));
+  root.appendChild(el("div",{class:"hint",style:"text-align:center;margin-top:16px",text:"MCVC Fitness tracker · v5"}));
 }
 function continuaMesociclo(){
   const cur=curCiclo(); const prevEnd=dayDate(cur.weeks.length-1,6,cur.startDate);
@@ -840,7 +1056,7 @@ function archiviaMesociclo(){
 }
 
 /* ========================= EXPORT EXCEL ========================= */
-function exportExcel(meso,schede,nome){
+function exportExcel(meso,schede,nome,misure){
   if(typeof XLSX==="undefined"){ toast("Libreria Excel non caricata, riprova online"); return; }
   const wb=XLSX.utils.book_new();
   const head=["Ciclo","Sett. (mesociclo)","Sett. (ciclo)","Giorno","Data","Allenamento","Carbo (g)","Proteine (g)","Grassi (g)","Kcal","Peso","Sensazioni","Allo specchio","Sonno ore","Sonno min","Sonno tot (h)","Qualità sonno","Passi","Appetito","Stress"];
@@ -856,6 +1072,9 @@ function exportExcel(meso,schede,nome){
   sch.days.forEach(day=>{ const R=[]; day.weeks.forEach((w,wi)=>{ R.push(["Settimana "+(wi+1)]); R.push(["Esercizio","Serie × rip","Recupero","Peso × ripetizioni","Sensazioni"]);
       w.exercises.forEach(e=>R.push([e.nome||"",e.prog||"",e.rec||"",e.peso||"",e.sens||""])); R.push([]); });
     const ws=XLSX.utils.aoa_to_sheet(R.length?R:[["(vuoto)"]]); ws["!cols"]=[{wch:26},{wch:12},{wch:10},{wch:20},{wch:22}]; XLSX.utils.book_append_sheet(wb,ws,safeSheet(day.nome)); });
+  if(misure && misure.length){ const MR=[["Data","Girovita","Coscia dx","Coscia sx","Braccio dx","Braccio sx","Petto/Spalla"]];
+    misure.slice().sort((a,b)=>a.dataISO<b.dataISO?-1:1).forEach(mm=>MR.push([mm.dataISO,nb(mm.girovita),nb(mm.cosciaDx),nb(mm.cosciaSx),nb(mm.braccioDx),nb(mm.braccioSx),nb(mm.petto)]));
+    const wsM=XLSX.utils.aoa_to_sheet(MR); wsM["!cols"]=[{wch:12},{wch:9},{wch:10},{wch:10},{wch:10},{wch:10},{wch:12}]; XLSX.utils.book_append_sheet(wb,wsM,"Circonferenze"); }
   XLSX.writeFile(wb,(nome||"MCVC").replace(/[^\w\s-]/g,"").trim().replace(/\s+/g,"_")+"_"+toISO(new Date())+".xlsx"); toast("Excel esportato"); }
 function nb(s){ const n=parseNum(s); return n===null?"":n; }
 function rb(n,dec){ return n===null?"":Number(n.toFixed(dec)); }
@@ -874,10 +1093,11 @@ function importBackup(ev){ const f=ev.target.files&&ev.target.files[0]; if(!f) r
 (function initToday(){ state.diaCiclo=cicli().length-1; const c=curCiclo(); const idx=Math.floor((today0()-parseISO(c.startDate))/86400000); const total=c.weeks.length*7;
   state.diaFlat=Math.min(Math.max(0,idx),total-1); })();
 render();
-if(syncReady()) syncInit(); else setSyncBadge();
+if(loggedIn()){ syncInit(); }
+else { syncBooted=true; setSyncBadge("off"); if(syncConfigured() && !localStorage.getItem(SKIP_LS)) openLogin(); }
 window.addEventListener("pagehide",saveDB);
 window.addEventListener("beforeunload",saveDB);
-document.addEventListener("visibilitychange",()=>{ if(document.visibilityState==="hidden") saveDB(); else if(syncReady()) syncRefresh(); });
+document.addEventListener("visibilitychange",()=>{ if(document.visibilityState==="hidden") saveDB(); else syncRefresh(); });
 </script>
 </body>
 </html>
