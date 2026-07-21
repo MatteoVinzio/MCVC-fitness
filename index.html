@@ -303,8 +303,11 @@ function flashSaved(){ if(syncReady()) return; const d=document.getElementById("
 let pushTimer=null;
 function syncReady(){ return !!(SUPABASE_URL && SUPABASE_ANON_KEY); }
 function endpoint(){ return SUPABASE_URL.replace(/\/+$/,"")+"/rest/v1/mcvc_state"; }
-function syncHeaders(extra){ return Object.assign({apikey:SUPABASE_ANON_KEY,Authorization:"Bearer "+SUPABASE_ANON_KEY},extra||{}); }
-function setSyncBadge(st){ const b=document.getElementById("syncBadge"); if(!syncReady()){ b.className="badge"; return; }
+function syncHeaders(extra){
+  return Object.assign({
+    apikey: SUPABASE_ANON_KEY
+  }, extra || {});
+}function setSyncBadge(st){ const b=document.getElementById("syncBadge"); if(!syncReady()){ b.className="badge"; return; }
   b.className="badge show "+(st==="ok"?"ok":st==="busy"?"busy":"err"); b.textContent = st==="ok"?"Sync ✓":st==="busy"?"Sync…":"Sync !"; }
 async function syncPull(){ if(!syncReady()) return null;
   const r=await fetch(endpoint()+"?id=eq."+encodeURIComponent(SYNC_ID)+"&select=data,updated_at",{headers:syncHeaders()});
