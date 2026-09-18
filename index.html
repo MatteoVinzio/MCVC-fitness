@@ -177,6 +177,27 @@
   .toast.show{opacity:1;transform:translateX(-50%) translateY(-4px);}
   .divider{height:1px;background:var(--line);margin:14px 0;}
   .empty{text-align:center;color:var(--ink-soft);padding:30px 16px;} .empty .big{font-size:40px;margin-bottom:8px;}
+
+  /* --- Allenamento: intestazione esercizio, sposta su/giù, blocchi, riferimento settimana precedente --- */
+  .exhead{display:flex;align-items:center;gap:8px;margin-bottom:4px;}
+  .exname-inp{font-weight:700;font-size:16px;border-color:#dcdce0;}
+  .exmove{display:flex;flex-direction:column;gap:4px;flex:0 0 auto;}
+  .mvbtn{width:36px;height:23px;border:1.5px solid var(--line);background:#fff;border-radius:8px;font-size:13px;line-height:1;cursor:pointer;color:var(--ink-soft);}
+  .mvbtn:disabled{opacity:.3;} .mvbtn:active:not(:disabled){background:var(--navy-soft);}
+  .exblk{margin-top:8px;}
+  .exblk.multi{border:1px solid #f0dcbb;border-left:4px solid var(--orange);background:var(--orange-soft);border-radius:10px;padding:11px;margin-top:10px;}
+  .exblk.multi .keyfield input{background:#fff;border-color:var(--line);}
+  .blk-hd{display:flex;gap:8px;align-items:center;margin-bottom:8px;}
+  .blk-tag{font-weight:700;color:var(--navy);}
+  .blk-rm{flex:0 0 auto;width:32px;height:32px;border:none;background:#fff;border-radius:8px;color:#c0392b;font-size:13px;cursor:pointer;}
+  .prevref{margin-top:7px;font-size:12.5px;color:var(--gold);font-weight:600;background:#fff;border:1px dashed #e6d3a8;border-radius:8px;padding:5px 10px;display:inline-block;font-variant-numeric:tabular-nums;}
+  .prevref-ic{opacity:.8;} .prevref-sens{color:var(--ink-soft);font-weight:500;font-style:italic;}
+  .exfoot2{display:flex;gap:8px;margin-top:11px;flex-wrap:wrap;} .exfoot2 .btn{flex:1 1 auto;}
+  .wkcount{display:flex;align-items:center;gap:10px;background:#fff;border:1px solid var(--line);border-radius:12px;padding:8px 10px 8px 14px;margin-bottom:10px;}
+  .wkcount-l{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.3px;color:var(--ink-soft);flex:1;}
+  .wkcount-n{font-weight:700;font-size:14px;min-width:104px;text-align:center;}
+  .stp{width:42px;height:40px;border:1.5px solid var(--line);background:#fff;border-radius:10px;font-size:21px;line-height:1;cursor:pointer;color:var(--navy);flex:0 0 auto;}
+  .stp:disabled{opacity:.35;} .stp:active:not(:disabled){background:var(--navy-soft);}
 </style>
 </head>
 <body>
@@ -260,7 +281,23 @@ function clone(o){ return JSON.parse(JSON.stringify(o)); }
 /* ========================= DATABASE (v4: mesociclo → cicli) ========================= */
 function emptyDiaDay(){ return {allen:"",carbo:"",prot:"",grassi:"",kcal:"",peso:"",sens:"",vis:"",sonnoH:"",sonnoM:"",qual:"",passi:"",app:"",stress:""}; }
 function emptyDiaWeek(){ return {days:Array.from({length:7},emptyDiaDay)}; }
-function ex(nome,prog,rec){ return {nome:nome||"",prog:prog||"",rec:rec||"",peso:"",sens:""}; }
+function ex(nome,prog,rec){ return {nome:nome||"",tag:"",prog:prog||"",rec:rec||"",peso:"",sens:"",sets:[]}; }
+/* Un esercizio può avere più "blocchi" (es. Top set + Back off): il blocco primario sta
+   nei campi tag/prog/rec/peso/sens dell'esercizio, i blocchi extra in e.sets[]. Le app vecchie
+   leggono comunque il blocco primario e ignorano e.sets → nessun dato perso in sincronizzazione.
+   Struttura (nome/tag/prog/rec) = condivisa tra le settimane; record (peso/sens) = per settimana. */
+function fixExercise(e){ if(!e||typeof e!=="object") return ex();
+  ["nome","tag","prog","rec","peso","sens"].forEach(k=>{ if(e[k]===undefined||e[k]===null) e[k]=""; else e[k]=String(e[k]); });
+  if(!Array.isArray(e.sets)) e.sets=[];
+  e.sets=e.sets.filter(s=>s&&typeof s==="object").map(s=>{ ["tag","prog","rec","peso","sens"].forEach(k=>{ if(s[k]===undefined||s[k]===null) s[k]=""; }); return s; });
+  return e; }
+function fixSchedaDay(day){ if(!day||typeof day!=="object") return; if(!day.nome) day.nome="Giorno";
+  if(!Array.isArray(day.weeks)||!day.weeks.length) day.weeks=[{exercises:[]}];
+  day.weeks.forEach(w=>{ if(!Array.isArray(w.exercises)) w.exercises=[]; w.exercises=w.exercises.map(fixExercise); }); }
+/* copia della SOLA struttura di un esercizio (record peso/sensazioni azzerati) */
+function blankRecordsCopy(e){ const c={nome:e.nome||"",tag:e.tag||"",prog:e.prog||"",rec:e.rec||"",peso:"",sens:"",sets:[]};
+  if(Array.isArray(e.sets)) c.sets=e.sets.map(s=>({tag:s.tag||"",prog:s.prog||"",rec:s.rec||"",peso:"",sens:""}));
+  return c; }
 function newCiclo(nome,startDate){ return {nome:nome||"Ciclo 1",startDate:startDate||toISO(lastMonday()),weeks:[emptyDiaWeek()]}; }
 function defaultDB(){
   const g1=[ex("Stacchi semitese","2x6-8","3'"),ex("Leg curl","2x8-12","1'30\""),ex("T-bar (buco 3)","1x6-8","2'"),
@@ -291,6 +328,7 @@ function migrate(db){
   if(!Array.isArray(db.meso.cicli)||!db.meso.cicli.length) db.meso.cicli=[newCiclo("Ciclo 1")];
   db.meso.cicli.forEach(fixCiclo);
   if(!db.schede) db.schede={days:[]}; if(!Array.isArray(db.schede.days)) db.schede.days=[];
+  db.schede.days.forEach(fixSchedaDay);
   if(!Array.isArray(db.archivio)) db.archivio=[];
   db.archivio.forEach(m=>{ if(Array.isArray(m.cicli)) m.cicli.forEach(fixCiclo); });
   if(!Array.isArray(db.misure)) db.misure=[];
@@ -378,7 +416,9 @@ function sintesiDB(db){ try{ if(!db) return "(vuoto)";
 }catch(e){ return "(illeggibile)"; } }
 function isEmptyDB(db){ try{
   const hasDia = db.meso.cicli.some(c=>c.weeks.some(w=>w.days.some(d=>DKEYS.some(k=>String(d[k]||"").trim()!==""))));
-  const hasTrain = db.schede.days.some(day=>day.weeks.some(w=>w.exercises.some(e=>String(e.peso||"").trim()!==""||String(e.sens||"").trim()!=="")));
+  const blkFilled=e=>{ if(String(e.peso||"").trim()!==""||String(e.sens||"").trim()!=="") return true;
+    return Array.isArray(e.sets)&&e.sets.some(s=>String(s.peso||"").trim()!==""||String(s.sens||"").trim()!==""); };
+  const hasTrain = db.schede.days.some(day=>day.weeks.some(w=>w.exercises.some(blkFilled)));
   return !(hasDia||hasTrain||(db.archivio||[]).length>0||(db.misure||[]).length>0);
 }catch(e){ return false; } }
 
@@ -524,7 +564,7 @@ function openLogin(){
 
 /* ========================= STATO UI ========================= */
 const state={ tab:"diario", diaCiclo:0, diaMode:"giorno", diaFlat:0, diaWeek:0,
-  exDay:0, exWeek:0, exMode:"sintesi", consultMeso:"cur", consultCiclo:0,
+  exDay:0, exWeek:0, consultMeso:"cur", consultCiclo:0,
   riep:{preset:"mesociclo",from:"",to:""} };
 function resetNav(){ state.diaCiclo=cicli().length-1; state.diaFlat=0; state.diaWeek=0; state.consultMeso="cur"; state.consultCiclo=0; state.riep.from=""; }
 
@@ -688,67 +728,148 @@ function diarioDayCard(d,date,ro,recompute){
   return c;
 }
 
-/* ========================= ALLENAMENTO ========================= */
+/* ========================= ALLENAMENTO =========================
+   Idea: la STRUTTURA della scheda (esercizi, ordine, serie×rip, recupero, blocchi
+   top set/back off) è UNICA e vale per tutte le settimane del giorno. Cambia da una
+   settimana all'altra solo ciò che REGISTRI: peso×ripetizioni e sensazioni.
+   Così scrivi la scheda una volta, imposti quante settimane vuoi e ogni settimana
+   compili solo i carichi, vedendo come riferimento quelli della settimana precedente. */
+function curDay(){ const days=DB.schede.days; if(!days.length) days.push({nome:"Giorno 1",weeks:[{exercises:[]}]});
+  if(state.exDay>=days.length) state.exDay=days.length-1; if(state.exDay<0) state.exDay=0; return days[state.exDay]; }
+/* esegue fn(exercises, weekIndex) su OGNI settimana del giorno corrente → propaga i cambi di struttura */
+function eachWeekEx(fn){ curDay().weeks.forEach((w,wi)=>{ if(!Array.isArray(w.exercises)) w.exercises=[]; fn(w.exercises,wi,w); }); }
+/* blocchi di un esercizio: [primario, ...back off]. Tutti hanno tag/prog/rec/peso/sens */
+function blocksOf(e){ const b=[e]; if(Array.isArray(e.sets)) e.sets.forEach(s=>b.push(s)); return b; }
+/* allinea le settimane alla stessa struttura (numero esercizi/blocchi), senza toccare i record già inseriti */
+function alignDay(day){ const weeks=day.weeks||[]; if(!weeks.length) return;
+  let tpl=weeks[0]; weeks.forEach(w=>{ if((w.exercises||[]).length>(tpl.exercises||[]).length) tpl=w; });
+  const n=tpl.exercises.length;
+  weeks.forEach(w=>{ if(!Array.isArray(w.exercises)) w.exercises=[];
+    for(let i=w.exercises.length;i<n;i++) w.exercises.push(blankRecordsCopy(tpl.exercises[i]));
+    for(let i=0;i<n;i++){ const te=tpl.exercises[i], e=w.exercises[i]; if(!e||!te) continue;
+      if(!Array.isArray(e.sets)) e.sets=[]; const tb=Array.isArray(te.sets)?te.sets.length:0;
+      for(let b=e.sets.length;b<tb;b++){ const ts=te.sets[b]; e.sets.push({tag:ts.tag||"",prog:ts.prog||"",rec:ts.rec||"",peso:"",sens:""}); } } }); }
+
 function renderAllenamento(root){
-  const days=DB.schede.days; if(!days.length) days.push({nome:"Giorno 1",weeks:[{exercises:[]}]});
-  if(state.exDay>=days.length) state.exDay=0; const day=days[state.exDay];
+  const day=curDay(); alignDay(day);
+  /* scelta del giorno */
   const chips=el("div",{class:"chips"});
-  days.forEach((d,i)=>chips.appendChild(el("div",{class:"chip"+(i===state.exDay?" active":""),text:d.nome,onclick:()=>{ state.exDay=i; state.exWeek=Math.min(state.exWeek,d.weeks.length-1); render(); }})));
+  DB.schede.days.forEach((d,i)=>chips.appendChild(el("div",{class:"chip"+(i===state.exDay?" active":""),text:d.nome,
+    onclick:()=>{ state.exDay=i; state.exWeek=0; render(); }})));
   root.appendChild(chips);
   root.appendChild(el("div",{class:"exday-title",text:day.nome}));
-  root.appendChild(el("div",{class:"seg"},[
-    el("button",{class:state.exMode==="sintesi"?"active":"",text:"Sintesi",onclick:()=>{state.exMode="sintesi";render();}}),
-    el("button",{class:state.exMode==="modifica"?"active":"",text:"Modifica",onclick:()=>{state.exMode="modifica";render();}})
-  ]));
-  if(state.exWeek>=day.weeks.length) state.exWeek=day.weeks.length-1; if(state.exWeek<0) state.exWeek=0;
-  root.appendChild(weekNav(day.weeks.length,state.exWeek,n=>{state.exWeek=n;render();}));
+  /* gestione giorno */
+  root.appendChild(el("div",{class:"row-btns",style:"margin-bottom:10px"},[
+    el("button",{class:"btn soft sm",html:'＋ Giorno',onclick:addGiorno}),
+    el("button",{class:"btn ghost sm",html:'✏️ Rinomina',onclick:()=>renameGiorno(state.exDay)}),
+    (DB.schede.days.length>1?el("button",{class:"btn danger sm",html:'🗑 Giorno',onclick:()=>deleteGiorno(state.exDay)}):null) ]));
+  /* durata scheda: quante settimane */
+  const nW=day.weeks.length;
+  root.appendChild(el("div",{class:"wkcount"},[
+    el("span",{class:"wkcount-l",text:"Durata scheda"}),
+    el("button",{class:"stp",html:'−',title:"Una settimana in meno",onclick:()=>setWeekCount(nW-1),disabled:nW<=1?"":null}),
+    el("span",{class:"wkcount-n",text:nW+(nW===1?" settimana":" settimane")}),
+    el("button",{class:"stp",html:'＋',title:"Una settimana in più",onclick:()=>setWeekCount(nW+1)}) ]));
+  /* navigazione settimane (la freccia › sull'ultima aggiunge una settimana) */
+  if(state.exWeek>=nW) state.exWeek=nW-1; if(state.exWeek<0) state.exWeek=0;
+  root.appendChild(weekNav(nW,state.exWeek,n=>{ state.exWeek=n; render(); },
+    { fwd:()=>{ setWeekCount(day.weeks.length+1); state.exWeek=day.weeks.length-1; render(); } }));
   const wk=day.weeks[state.exWeek];
-  if(state.exMode==="sintesi"){
-    if(!wk.exercises.length) root.appendChild(el("div",{class:"hint",text:"Nessun esercizio. Passa a «Modifica» per aggiungerlo."}));
-    else root.appendChild(el("div",{class:"hint",text:"Tocca un esercizio per modificarlo."}));
-    const list=el("div",{}); wk.exercises.forEach(e=>list.appendChild(exSummaryCard(e))); root.appendChild(list);
-    root.appendChild(el("button",{class:"btn ghost full",style:"margin-top:4px",html:'✏️ Modifica scheda',onclick:()=>{state.exMode="modifica";render();}}));
-  } else {
-    root.appendChild(el("div",{class:"row-btns",style:"margin-bottom:10px"},[
-      el("button",{class:"btn soft sm",html:'＋ Giorno',onclick:addGiorno}),
-      el("button",{class:"btn ghost sm",html:'✏️ Rinomina',onclick:()=>renameGiorno(state.exDay)}),
-      (days.length>1?el("button",{class:"btn danger sm",html:'🗑 Elimina',onclick:()=>deleteGiorno(state.exDay)}):null) ]));
-    root.appendChild(el("div",{class:"row-btns",style:"margin-bottom:12px"},[
-      el("button",{class:"btn primary sm",html:'⧉ Duplica settimana',onclick:duplicaSettimana}),
-      el("button",{class:"btn ghost sm",html:'＋ Vuota',onclick:()=>{day.weeks.push({exercises:[]});state.exWeek=day.weeks.length-1;scheduleSave();render();}}),
-      (day.weeks.length>1?el("button",{class:"btn danger sm",html:'🗑 Sett.',onclick:deleteSettimana}):null) ]));
-    if(!wk.exercises.length) root.appendChild(el("div",{class:"hint",text:"Nessun esercizio in questa settimana. Aggiungine uno qui sotto."}));
-    const list=el("div",{}); wk.exercises.forEach((e,i)=>list.appendChild(exerciseCard(e,i,wk))); root.appendChild(list);
-    root.appendChild(el("button",{class:"btn soft full",style:"margin-top:4px",html:'＋ Aggiungi esercizio',onclick:()=>{wk.exercises.push(ex());scheduleSave();render();}}));
-  }
+  if(state.exWeek>0) root.appendChild(el("div",{class:"robanner",html:'Sotto ogni carico vedi la <b>Settimana '+state.exWeek+'</b> come riferimento — così sai cosa battere.'}));
+  if(!wk.exercises.length) root.appendChild(el("div",{class:"hint",text:"Nessun esercizio: aggiungine uno qui sotto. La struttura vale per tutte le settimane; ogni settimana compili solo i carichi."}));
+  const prev=state.exWeek>0?day.weeks[state.exWeek-1]:null;
+  const list=el("div",{}); wk.exercises.forEach((e,i)=>list.appendChild(exerciseCard(e,i,wk,prev))); root.appendChild(list);
+  root.appendChild(el("button",{class:"btn soft full",style:"margin-top:4px",html:'＋ Aggiungi esercizio',
+    onclick:()=>{ eachWeekEx(exs=>exs.push(ex())); scheduleSave(); render(); }}));
 }
-function exSummaryCard(e){ const c=el("div",{class:"exsum",onclick:()=>{state.exMode="modifica";render();}});
-  const head=el("div",{class:"exsum-head"},[ el("div",{class:"exsum-name",text:e.nome||"—"}) ]);
-  const meta=[]; if(e.prog) meta.push(e.prog); if(e.rec&&e.rec!=="/"&&e.rec!=="//") meta.push("rec "+e.rec);
-  if(meta.length) head.appendChild(el("div",{class:"exsum-meta",text:meta.join(" · ")}));
-  c.appendChild(head);
-  if(e.peso) c.appendChild(el("div",{class:"exsum-load",text:e.peso}));
-  if(e.sens) c.appendChild(el("div",{class:"exsum-sens",text:"“"+e.sens+"”"}));
-  return c; }
-function exerciseCard(e,idx,wk){ const c=el("div",{class:"ex"});
-  c.appendChild(el("div",{class:"exname"},[textInput(e,"nome","Nome esercizio")]));
-  c.appendChild(el("div",{class:"grid2"},[ el("div",{},[el("label",{class:"fl",text:"Serie × rip"}),textInput(e,"prog","es. 2x6-8")]),
-    el("div",{},[el("label",{class:"fl",text:"Recupero"}),textInput(e,"rec","es. 1'30\"")]) ]));
-  c.appendChild(el("div",{class:"field keyfield",style:"margin-top:10px"},[el("label",{class:"fl",text:"Peso × ripetizioni"}),textInput(e,"peso","es. 65(4)-55(7)")]));
-  c.appendChild(el("div",{class:"field",style:"margin-top:10px"},[el("label",{class:"fl",text:"Sensazioni"}),textInput(e,"sens","es. Bravo buffer")]));
-  c.appendChild(el("div",{class:"exfoot"},[el("button",{class:"btn danger sm",html:'Rimuovi',onclick:()=>{ if(confirm("Rimuovere «"+(e.nome||"esercizio")+"»?")){ wk.exercises.splice(idx,1); scheduleSave(); render(); } }})])); return c; }
+
+/* scheda di un esercizio: intestazione (nome + sposta su/giù + azioni) e uno o più blocchi */
+function exerciseCard(e,idx,wk,prevWeek){
+  const c=el("div",{class:"ex"});
+  const n=wk.exercises.length;
+  /* intestazione */
+  const nameI=textInput(e,"nome","Nome esercizio"); nameI.className+=" exname-inp";
+  nameI.addEventListener("input",()=>{ const v=nameI.value; eachWeekEx(a=>{ if(a[idx]) a[idx].nome=v; }); }); /* nome = condiviso */
+  const mv=el("div",{class:"exmove"},[
+    el("button",{class:"mvbtn",html:'↑',title:"Sposta su",disabled:idx===0?"":null,onclick:()=>moveExercise(idx,-1)}),
+    el("button",{class:"mvbtn",html:'↓',title:"Sposta giù",disabled:idx>=n-1?"":null,onclick:()=>moveExercise(idx,1)}) ]);
+  c.appendChild(el("div",{class:"exhead"},[ el("div",{class:"exname",style:"flex:1;margin:0"},[nameI]), mv ]));
+  /* blocchi (primario + eventuali back off) */
+  const blocks=blocksOf(e); const multi=blocks.length>1;
+  const prevBlocks=(prevWeek&&prevWeek.exercises[idx])?blocksOf(prevWeek.exercises[idx]):[];
+  blocks.forEach((blk,b)=>{
+    const bw=el("div",{class:"exblk"+(multi?" multi":"")});
+    if(multi){
+      const tagI=textInput(blk,"tag",b===0?"Top set":"Back off"); tagI.className+=" blk-tag";
+      tagI.addEventListener("input",()=>{ const v=tagI.value; eachWeekEx(a=>{ const bb=a[idx]?blocksOf(a[idx]):[]; if(bb[b]) bb[b].tag=v; }); });
+      bw.appendChild(el("div",{class:"blk-hd"},[ tagI,
+        el("button",{class:"blk-rm",html:'✕',title:"Togli questa serie",onclick:()=>removeBlock(idx,b)}) ]));
+    }
+    /* struttura condivisa: serie×rip + recupero */
+    const progI=textInput(blk,"prog","es. 3x6-8");
+    progI.addEventListener("input",()=>{ const v=progI.value; eachWeekEx(a=>{ const bb=a[idx]?blocksOf(a[idx]):[]; if(bb[b]) bb[b].prog=v; }); });
+    const recI=textInput(blk,"rec","es. 1'30\"");
+    recI.addEventListener("input",()=>{ const v=recI.value; eachWeekEx(a=>{ const bb=a[idx]?blocksOf(a[idx]):[]; if(bb[b]) bb[b].rec=v; }); });
+    bw.appendChild(el("div",{class:"grid2"},[ el("div",{},[el("label",{class:"fl",text:"Serie × rip"}),progI]),
+      el("div",{},[el("label",{class:"fl",text:"Recupero"}),recI]) ]));
+    /* record per-settimana: peso×rip (+ riferimento settimana precedente) */
+    const pesoWrap=el("div",{class:"field keyfield",style:"margin-top:10px"},[
+      el("label",{class:"fl",text:"Peso × ripetizioni"}), textInput(blk,"peso","es. 65(4)-55(7)") ]);
+    const pv=prevBlocks[b];
+    if(pv && String(pv.peso||"").trim()){
+      const ref=el("div",{class:"prevref"},[ el("span",{class:"prevref-ic",text:"↺ "}),
+        el("span",{text:"Sett. "+state.exWeek+": "}), el("b",{text:pv.peso}) ]);
+      if(String(pv.sens||"").trim()) ref.appendChild(el("span",{class:"prevref-sens",text:" · "+pv.sens}));
+      pesoWrap.appendChild(ref);
+    }
+    bw.appendChild(pesoWrap);
+    bw.appendChild(el("div",{class:"field",style:"margin-top:10px"},[el("label",{class:"fl",text:"Sensazioni"}),textInput(blk,"sens","es. Bravo buffer")]));
+    c.appendChild(bw);
+  });
+  /* azioni esercizio */
+  c.appendChild(el("div",{class:"exfoot2"},[
+    el("button",{class:"btn ghost sm",html:'＋ Serie (back off)',title:"Aggiungi un secondo blocco (es. back off)",onclick:()=>addBlock(idx)}),
+    el("button",{class:"btn danger sm",html:'🗑 Esercizio',onclick:()=>{ if(confirm("Rimuovere «"+(e.nome||"esercizio")+"» da tutte le settimane?")){ eachWeekEx(a=>a.splice(idx,1)); scheduleSave(); render(); } }}) ]));
+  return c;
+}
+
+/* sposta un esercizio su/giù: cambia l'ordine in TUTTE le settimane, così vale ovunque */
+function moveExercise(idx,dir){ const j=idx+dir; if(j<0) return;
+  eachWeekEx(a=>{ if(j<a.length && a[idx]!==undefined && a[j]!==undefined){ const t=a[idx]; a[idx]=a[j]; a[j]=t; } });
+  scheduleSave(); render(); }
+/* aggiunge un secondo blocco (back off) all'esercizio, in tutte le settimane */
+function addBlock(idx){ eachWeekEx(a=>{ const e=a[idx]; if(!e) return; if(!Array.isArray(e.sets)) e.sets=[];
+  e.sets.push({tag:"",prog:"",rec:"",peso:"",sens:""}); }); scheduleSave(); render(); }
+/* toglie un blocco: se è il primario e ci sono back off, il primo back off diventa primario */
+function removeBlock(idx,b){ const day=curDay();
+  if(b===0){
+    const hasSets=day.weeks.some(w=>w.exercises[idx]&&Array.isArray(w.exercises[idx].sets)&&w.exercises[idx].sets.length);
+    if(!hasSets){ if(confirm("Rimuovere l'esercizio?")){ eachWeekEx(a=>a.splice(idx,1)); scheduleSave(); render(); } return; }
+    eachWeekEx(a=>{ const e=a[idx]; if(!e||!Array.isArray(e.sets)||!e.sets.length) return; const s=e.sets.shift();
+      e.tag=s.tag; e.prog=s.prog; e.rec=s.rec; e.peso=s.peso; e.sens=s.sens; });
+  } else {
+    eachWeekEx(a=>{ const e=a[idx]; if(e&&Array.isArray(e.sets)&&e.sets.length>=b) e.sets.splice(b-1,1); });
+  }
+  scheduleSave(); render(); }
+/* imposta quante settimane deve durare la scheda (aggiunge copiando la struttura, rimuove dal fondo) */
+function setWeekCount(n){ const day=curDay(); n=Math.max(1,Math.min(52,n)); const cur=day.weeks.length; if(n===cur) return;
+  if(n>cur){ for(let k=cur;k<n;k++){ const last=day.weeks[day.weeks.length-1];
+      day.weeks.push({exercises:(last?last.exercises:[]).map(blankRecordsCopy)}); } toast("Scheda su "+n+" settimane"); }
+  else { let hasData=false; for(let k=cur-1;k>=n;k--){ if(weekHasData(day.weeks[k])) hasData=true; }
+    if(hasData && !confirm("Le ultime "+(cur-n)+" settimane hanno carichi registrati. Eliminarle comunque?")) return;
+    day.weeks.splice(n); toast(n===1?"Scheda su 1 settimana":"Scheda su "+n+" settimane"); }
+  if(state.exWeek>=day.weeks.length) state.exWeek=day.weeks.length-1;
+  scheduleSave(); render(); }
+function weekHasData(w){ return (w.exercises||[]).some(e=>blocksOf(e).some(bl=>String(bl.peso||"").trim()||String(bl.sens||"").trim())); }
+
 function addGiorno(){ const nome=prompt("Nome del nuovo giorno:","Giorno "+(DB.schede.days.length+1)); if(nome===null) return;
   DB.schede.days.push({nome:nome.trim()||("Giorno "+(DB.schede.days.length+1)),weeks:[{exercises:[]}]}); state.exDay=DB.schede.days.length-1; state.exWeek=0; scheduleSave(); render(); }
 function renameGiorno(i){ const nome=prompt("Rinomina giorno:",DB.schede.days[i].nome); if(nome===null) return; DB.schede.days[i].nome=nome.trim()||DB.schede.days[i].nome; scheduleSave(); render(); }
 function deleteGiorno(i){ if(DB.schede.days.length<=1) return; if(!confirm("Eliminare «"+DB.schede.days[i].nome+"» con tutte le settimane?")) return;
   DB.schede.days.splice(i,1); state.exDay=Math.max(0,i-1); state.exWeek=0; scheduleSave(); render(); }
-function duplicaSettimana(){ const day=DB.schede.days[state.exDay]; const src=day.weeks[state.exWeek];
-  day.weeks.splice(state.exWeek+1,0,{exercises:src.exercises.map(e=>({nome:e.nome,prog:e.prog,rec:e.rec,peso:e.peso,sens:""}))}); state.exWeek++; scheduleSave(); render(); toast("Settimana duplicata · sensazioni azzerate"); }
-function deleteSettimana(){ const day=DB.schede.days[state.exDay]; if(day.weeks.length<=1) return; if(!confirm("Eliminare la Settimana "+(state.exWeek+1)+" di "+day.nome+"?")) return;
-  day.weeks.splice(state.exWeek,1); state.exWeek=Math.max(0,state.exWeek-1); scheduleSave(); render(); }
-/* nuovo blocco allenamento: mantiene la struttura (nome/serie/recupero), azzera i dati registrati (peso e sensazioni) */
+/* nuovo blocco allenamento: mantiene la struttura (nome/serie/recupero/back off), azzera i record (peso e sensazioni) */
 function resetTrainingBlock(){ DB.schede.days.forEach(day=>{ const last=day.weeks[day.weeks.length-1];
-  day.weeks=[{exercises:(last?last.exercises:[]).map(e=>({nome:e.nome,prog:e.prog,rec:e.rec,peso:"",sens:""}))}]; }); }
+  day.weeks=[{exercises:(last?last.exercises:[]).map(blankRecordsCopy)}]; }); }
 
 /* ========================= ANALITICA ========================= */
 function mesoWeeks(meso){ const arr=[]; meso.cicli.forEach(c=>c.weeks.forEach((w,wi)=>arr.push({week:w,ciclo:c.nome,startDate:c.startDate,wi:wi}))); return arr; }
@@ -1106,7 +1227,8 @@ function exportExcel(meso,schede,nome,misure){
   XLSX.utils.book_append_sheet(wb,wsD,"Diario mesociclo");
   const sch=schede||{days:[]};
   sch.days.forEach(day=>{ const R=[]; day.weeks.forEach((w,wi)=>{ R.push(["Settimana "+(wi+1)]); R.push(["Esercizio","Serie × rip","Recupero","Peso × ripetizioni","Sensazioni"]);
-      w.exercises.forEach(e=>R.push([e.nome||"",e.prog||"",e.rec||"",e.peso||"",e.sens||""])); R.push([]); });
+      w.exercises.forEach(e=>{ R.push([e.nome||"",(e.tag?e.tag+" · ":"")+(e.prog||""),e.rec||"",e.peso||"",e.sens||""]);
+        (e.sets||[]).forEach(s=>R.push(["   ↳ "+(s.tag||"Back off"),s.prog||"",s.rec||"",s.peso||"",s.sens||""])); }); R.push([]); });
     const ws=XLSX.utils.aoa_to_sheet(R.length?R:[["(vuoto)"]]); ws["!cols"]=[{wch:26},{wch:12},{wch:10},{wch:20},{wch:22}]; XLSX.utils.book_append_sheet(wb,ws,safeSheet(day.nome)); });
   if(misure && misure.length){ const MR=[["Data","Girovita","Coscia dx","Coscia sx","Braccio dx","Braccio sx","Petto/Spalla"]];
     misure.slice().sort((a,b)=>a.dataISO<b.dataISO?-1:1).forEach(mm=>MR.push([mm.dataISO,nb(mm.girovita),nb(mm.cosciaDx),nb(mm.cosciaSx),nb(mm.braccioDx),nb(mm.braccioSx),nb(mm.petto)]));
